@@ -1,251 +1,166 @@
-provider "aws" {
-  region = local.region
-}
-
-data "aws_availability_zones" "available" {}
-
-locals {
-  name   = "ex-${basename(path.cwd)}"
-  region = "eu-west-1"
-
-  vpc_cidr = "10.0.0.0/16"
-  azs      = slice(data.aws_availability_zones.available.names, 0, 3)
-
-  tags = {
-    Example    = local.name
-    GithubRepo = "terraform-aws-vpc"
-    GithubOrg  = "terraform-aws-modules"
-  }
-}
-
-################################################################################
-# VPC Module
-################################################################################
-
-module "vpc" {
-  source = "../../"
-
-  name = local.name
-  cidr = local.vpc_cidr
-
-  azs                 = local.azs
-  private_subnets     = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k)]
-  public_subnets      = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 4)]
-  database_subnets    = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 8)]
-  elasticache_subnets = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 12)]
-  redshift_subnets    = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 16)]
-  intra_subnets       = [for k, v in local.azs : cidrsubnet(local.vpc_cidr, 8, k + 20)]
-
-  private_subnet_names = ["Private Subnet One", "Private Subnet Two"]
-  # public_subnet_names omitted to show default name generation for all three subnets
-  database_subnet_names    = ["DB Subnet One"]
-  elasticache_subnet_names = ["Elasticache Subnet One", "Elasticache Subnet Two"]
-  redshift_subnet_names    = ["Redshift Subnet One", "Redshift Subnet Two", "Redshift Subnet Three"]
-  intra_subnet_names       = []
-
-  create_database_subnet_group  = false
-  manage_default_network_acl    = false
-  manage_default_route_table    = false
-  manage_default_security_group = false
-
-  enable_dns_hostnames = true
+#
+# VPC resources
+#
+resource "aws_vpc" "default" {
+  cidr_block           = var.cidr_block
   enable_dns_support   = true
+  enable_dns_hostnames = true
 
-  enable_nat_gateway = true
-  single_nat_gateway = true
-
-  customer_gateways = {
-    IP1 = {
-      bgp_asn     = 65112
-      ip_address  = "1.2.3.4"
-      device_name = "some_name"
+  tags = merge(
+    {
+      Name        = var.name,
+      Project     = var.project,
+      Environment = var.environment
     },
-    IP2 = {
-      bgp_asn    = 65112
-      ip_address = "5.6.7.8"
-    }
-  }
-
-  enable_vpn_gateway = true
-
-  enable_dhcp_options              = true
-  dhcp_options_domain_name         = "service.consul"
-  dhcp_options_domain_name_servers = ["127.0.0.1", "10.10.0.2"]
-
-  # VPC Flow Logs (Cloudwatch log group and IAM role will be created)
-  enable_flow_log                      = true
-  create_flow_log_cloudwatch_log_group = true
-  create_flow_log_cloudwatch_iam_role  = true
-  flow_log_max_aggregation_interval    = 60
-
-  tags = local.tags
+    var.tags
+  )
 }
 
-################################################################################
-# VPC Endpoints Module
-################################################################################
+resource "aws_internet_gateway" "default" {
+  vpc_id = aws_vpc.default.id
 
-module "vpc_endpoints" {
-  source = "../../modules/vpc-endpoints"
-
-  vpc_id             = module.vpc.vpc_id
-  security_group_ids = [data.aws_security_group.default.id]
-
-  endpoints = {
-    s3 = {
-      service = "s3"
-      tags    = { Name = "s3-vpc-endpoint" }
+  tags = merge(
+    {
+      Name        = "gwInternet",
+      Project     = var.project,
+      Environment = var.environment
     },
-    dynamodb = {
-      service         = "dynamodb"
-      service_type    = "Gateway"
-      route_table_ids = flatten([module.vpc.intra_route_table_ids, module.vpc.private_route_table_ids, module.vpc.public_route_table_ids])
-      policy          = data.aws_iam_policy_document.dynamodb_endpoint_policy.json
-      tags            = { Name = "dynamodb-vpc-endpoint" }
-    },
-    ssm = {
-      service             = "ssm"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      security_group_ids  = [aws_security_group.vpc_tls.id]
-    },
-    ssmmessages = {
-      service             = "ssmmessages"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      security_group_ids  = [aws_security_group.vpc_tls.id]
-    },
-    lambda = {
-      service             = "lambda"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-    },
-    ecs = {
-      service             = "ecs"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-    },
-    ecs_telemetry = {
-      create              = false
-      service             = "ecs-telemetry"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-    },
-    ec2 = {
-      service             = "ec2"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      security_group_ids  = [aws_security_group.vpc_tls.id]
-    },
-    ec2messages = {
-      service             = "ec2messages"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      security_group_ids  = [aws_security_group.vpc_tls.id]
-    },
-    ecr_api = {
-      service             = "ecr.api"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      policy              = data.aws_iam_policy_document.generic_endpoint_policy.json
-    },
-    ecr_dkr = {
-      service             = "ecr.dkr"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      policy              = data.aws_iam_policy_document.generic_endpoint_policy.json
-    },
-    kms = {
-      service             = "kms"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-      security_group_ids  = [aws_security_group.vpc_tls.id]
-    },
-    codedeploy = {
-      service             = "codedeploy"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-    },
-    codedeploy_commands_secure = {
-      service             = "codedeploy-commands-secure"
-      private_dns_enabled = true
-      subnet_ids          = module.vpc.private_subnets
-    },
-  }
-
-  tags = merge(local.tags, {
-    Project  = "Secret"
-    Endpoint = "true"
-  })
+    var.tags
+  )
 }
 
-module "vpc_endpoints_nocreate" {
-  source = "../../modules/vpc-endpoints"
+resource "aws_route_table" "private" {
+  count = length(var.private_subnet_cidr_blocks)
 
-  create = false
+  vpc_id = aws_vpc.default.id
+
+  tags = merge(
+    {
+      Name        = "PrivateRouteTable",
+      Project     = var.project,
+      Environment = var.environment
+    },
+    var.tags
+  )
 }
 
-################################################################################
-# Supporting Resources
-################################################################################
+resource "aws_route" "private" {
+  count = length(var.private_subnet_cidr_blocks)
 
-data "aws_security_group" "default" {
-  name   = "default"
-  vpc_id = module.vpc.vpc_id
+  route_table_id         = aws_route_table.private[count.index].id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.default[count.index].id
 }
 
-data "aws_iam_policy_document" "dynamodb_endpoint_policy" {
-  statement {
-    effect    = "Deny"
-    actions   = ["dynamodb:*"]
-    resources = ["*"]
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.default.id
 
-    principals {
-      type        = "*"
-      identifiers = ["*"]
-    }
-
-    condition {
-      test     = "StringNotEquals"
-      variable = "aws:sourceVpce"
-
-      values = [module.vpc.vpc_id]
-    }
-  }
+  tags = merge(
+    {
+      Name        = "PublicRouteTable",
+      Project     = var.project,
+      Environment = var.environment
+    },
+    var.tags
+  )
 }
 
-data "aws_iam_policy_document" "generic_endpoint_policy" {
-  statement {
-    effect    = "Deny"
-    actions   = ["*"]
-    resources = ["*"]
-
-    principals {
-      type        = "*"
-      identifiers = ["*"]
-    }
-
-    condition {
-      test     = "StringNotEquals"
-      variable = "aws:SourceVpc"
-
-      values = [module.vpc.vpc_id]
-    }
-  }
+resource "aws_route" "public" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.default.id
 }
 
-resource "aws_security_group" "vpc_tls" {
-  name_prefix = "${local.name}-vpc_tls"
-  description = "Allow TLS inbound traffic"
-  vpc_id      = module.vpc.vpc_id
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidr_blocks)
 
-  ingress {
-    description = "TLS from VPC"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [module.vpc.vpc_cidr_block]
-  }
+  vpc_id            = aws_vpc.default.id
+  cidr_block        = var.private_subnet_cidr_blocks[count.index]
+  availability_zone = var.availability_zones[count.index]
 
-  tags = local.tags
+  tags = merge(
+    {
+      Name        = "PrivateSubnet",
+      Project     = var.project,
+      Environment = var.environment
+    },
+    var.tags
+  )
+}
+
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidr_blocks)
+
+  vpc_id                  = aws_vpc.default.id
+  cidr_block              = var.public_subnet_cidr_blocks[count.index]
+  availability_zone       = var.availability_zones[count.index]
+  map_public_ip_on_launch = true
+
+  tags = merge(
+    {
+      Name        = "PublicSubnet",
+      Project     = var.project,
+      Environment = var.environment
+    },
+    var.tags
+  )
+}
+
+resource "aws_route_table_association" "private" {
+  count = length(var.private_subnet_cidr_blocks)
+
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private[count.index].id
+}
+
+resource "aws_route_table_association" "public" {
+  count = length(var.public_subnet_cidr_blocks)
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id       = aws_vpc.default.id
+  service_name = "com.amazonaws.${var.region}.s3"
+  route_table_ids = flatten([
+    aws_route_table.public.id,
+    aws_route_table.private.*.id
+  ])
+
+  tags = merge(
+    {
+      Name        = "endpointS3",
+      Project     = var.project,
+      Environment = var.environment
+    },
+    var.tags
+  )
+}
+
+#
+# NAT resources
+#
+resource "aws_eip" "nat" {
+  count = length(var.public_subnet_cidr_blocks)
+
+  vpc = true
+}
+
+resource "aws_nat_gateway" "default" {
+  depends_on = [aws_internet_gateway.default]
+
+  count = length(var.public_subnet_cidr_blocks)
+
+  allocation_id = aws_eip.nat[count.index].id
+  subnet_id     = aws_subnet.public[count.index].id
+
+  tags = merge(
+    {
+      Name        = "gwNAT",
+      Project     = var.project,
+      Environment = var.environment
+    },
+    var.tags
+  )
 }
